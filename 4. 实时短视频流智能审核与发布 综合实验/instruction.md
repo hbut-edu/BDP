@@ -10,7 +10,7 @@
 - 第二章的流处理工程挑战：视频帧流天然存在吞吐、延迟、反压、失败恢复、热点内容等问题。
 - 第三章的 AI 推荐系统经验：内容标签和理解结果可以继续作为推荐、搜索、画像和召回的上游特征。
 
-本实验默认使用 `FastAPI + OpenCV + Kafka + Ollama 本地多模态模型 + SQLite`。其中 SQLite 是单机教学版的元数据存储，工业环境中可替换为 PostgreSQL、ElasticSearch、ClickHouse、Paimon 或湖仓表；视频文件可替换为 MinIO/S3；理解模型通过 Ollama 下载到学生本机，Windows、Linux、macOS 使用同一套本地 API，后台可在 Qwen、Gemma、MiniCPM 和本地 baseline 之间切换。
+本实验默认使用 `FastAPI + OpenCV + SQLite 本地耐久队列 + 本地 worker + Ollama 本地多模态模型`。其中 SQLite 同时承担单机教学版的元数据存储、事件日志和任务队列，工业环境中可替换为 PostgreSQL、ElasticSearch、ClickHouse、Paimon 或湖仓表；视频文件可替换为 MinIO/S3；任务队列可替换为 Kafka/Pulsar；理解模型通过 Ollama 下载到学生本机，Windows、Linux、macOS 使用同一套本地 API，后台可在 Qwen、Gemma、MiniCPM 和本地 baseline 之间切换。
 
 ---
 
@@ -22,7 +22,7 @@
 2. 使用 OpenCV 对视频做关键帧采样、场景切分、运动峰值识别和音频轨抽取。
 3. 将 Qwen3-VL、Qwen2.5-VL、Gemma 3、MiniCPM-V 等 Ollama 多模态模型作为可切换候选，默认使用 16GB 机器可运行的 Qwen3-VL 4B。
 4. 设计一个结合 VLM 结构化理解、视觉技术指标和平台规则的审核策略，区分自动发布、人工复核和拒绝发布。
-5. 使用 Kafka 将视频进入事件和审核结果解耦，理解消息队列在内容平台中的作用。
+5. 使用本地耐久队列或 Kafka 将视频进入事件和审核结果解耦，理解消息队列在内容平台中的作用。
 6. 使用 FastAPI 构建一个可运行的网站和 API，把审核结果发布到短视频信息流。
 7. 形成可观测日志，能够解释每个视频为什么被发布、复核或拒绝。
 
@@ -37,7 +37,9 @@
    ↓
 上传/生成/下载样本
    ↓
-Kafka: short_video_ingest（可选）
+任务队列：SQLite jobs（默认）或 Kafka short_video_ingest（可选）
+   ↓
+本地审核 worker / Kafka consumer
    ↓
 OpenCV 关键帧/场景切分/音频预处理
    ↓
@@ -51,8 +53,77 @@ OpenCV 关键帧/场景切分/音频预处理
    ↓
 FastAPI Demo 网站展示
    ↓
-Kafka: short_video_result（可选）
+审核结果：SQLite videos/events（默认）或 Kafka short_video_result（可选）
 ```
+
+### 为什么采用“工业轻量版”架构
+
+真实短视频平台通常不会在上传接口中直接调用大模型。原因很朴素：视频理解耗时长、失败概率高、模型吞吐有限，如果把这些工作塞进 HTTP 请求线程，用户会等待很久，服务也容易被少量大视频拖垮。因此工业系统一般会把链路拆成几个职责清晰的组件：
+
+| 工业职责 | 生产环境常见实现 | 本实验默认实现 | 这样选择的原因 |
+| --- | --- | --- | --- |
+| 媒体存储 | S3/OSS/COS/MinIO + CDN | 本地 `data/media` | 不要求学生安装对象存储，浏览器仍能真实播放视频 |
+| 任务队列 | Kafka/Pulsar/RabbitMQ | SQLite `jobs` 表 | 保留“入队/消费/失败恢复”语义，同时不依赖 Docker |
+| 审核 worker | 独立容器、K8s Job、Ray/KServe worker | `LocalReviewWorker` 后台线程 | 让 16GB/32GB 电脑一次只跑一个模型任务，避免内存打爆 |
+| 模型服务 | vLLM/SGLang/Triton/KServe/云模型 API | Ollama 本地 HTTP API | 跨 Windows/Linux/macOS，权重在本机，课堂网络不稳定也能演示 |
+| 元数据与审计 | PostgreSQL/ClickHouse/ElasticSearch/Paimon | SQLite `videos/events/jobs` | 单机可运行，同时保留可追溯记录 |
+| 流批分析 | Flink 写湖仓，Spark/Flink SQL 分析 | 事件日志 + Kafka 扩展脚本 | 先跑通业务闭环，再接回前三章流批一体基础设施 |
+
+这不是把工业架构“缩水成玩具”，而是把工业架构中最重要的边界保留下来：上传服务只负责接收和展示，队列负责削峰和解耦，worker 负责耗时处理，模型服务负责多模态理解，元数据层负责查询和审计。将来要升级时，可以替换组件，而不是推倒业务流程。
+
+### 端到端时序
+
+下面的时序是本实验最核心的观察对象。请同学们在网站事件面板和 `/api/events` 中对照这些阶段：
+
+```text
+1. 浏览器上传视频或点击“运行样本流”
+2. FastAPI 保存视频文件到 data/media
+3. FastAPI 写入 videos 记录：status = processing
+4. 网站立刻显示真实视频播放器，摘要和标签区域显示 loading
+5. FastAPI 写入 jobs 记录：status = queued
+6. LocalReviewWorker 领取任务：queued -> running
+7. OpenCV 抽样帧、计算亮度/运动/闪烁等指标
+8. Ollama Qwen3-VL 读取代表性关键帧，输出摘要、标签、风险
+9. 审核策略合并模型风险、视觉指标和标题规则
+10. videos 更新为 published/review/rejected
+11. jobs 更新为 done，events 保留完整审计轨迹
+12. 网站轮询刷新文字状态，但不重建 video 节点，播放不中断
+```
+
+### 状态机与可观测性
+
+短视频审核系统不是只有“通过/不通过”两个结果。为了让学生理解生产系统中的可观测性，本实验显式维护两个状态机。
+
+视频状态机：
+
+```text
+processing
+   ├── published  自动发布
+   ├── review     进入人工复核
+   └── rejected   失败关闭或策略拒绝
+```
+
+队列任务状态机：
+
+```text
+queued
+   ├── running
+   │     ├── done
+   │     └── failed
+   └── queued  服务重启后，未完成 running 任务会被重新放回队列
+```
+
+事件日志记录了系统为什么进入某个状态。典型事件包括：
+
+| 事件阶段 | 含义 | 验证方式 |
+| --- | --- | --- |
+| `ingest` | 收到视频并准备写入媒体区 | `/api/events` 中能看到文件路径和标题 |
+| `queued` | 视频已显示，审核任务已入队 | `/api/health` 中 `jobs.queued` 增加 |
+| `worker` | 本地 worker 开始或完成任务 | 事件面板出现 worker 事件 |
+| `frame_sample` | OpenCV 已抽样分析帧 | 事件 payload 包含亮度、运动等指标 |
+| `vlm_understanding` | 本地多模态模型完成理解 | payload 中包含模型摘要和风险 |
+| `moderation` | 平台策略完成审核 | payload 中包含风险分和理由 |
+| `publish` | 最终发布、复核或拒绝 | 视频卡片状态更新 |
 
 ### 工程目录
 
@@ -64,6 +135,8 @@ Kafka: short_video_result（可选）
     │   ├── config.py                 # 路径、阈值、实验配置
     │   ├── demo_assets.py            # 生成本地短视频样本
     │   ├── ffmpeg_tools.py           # ffmpeg 元数据/封面辅助能力
+    │   ├── job_queue.py              # SQLite 本地耐久任务队列
+    │   ├── local_worker.py           # 本地审核 worker：消费队列任务
     │   ├── model_registry.py         # 模型候选列表与后台选择状态
     │   ├── pipeline.py               # 上传、理解、审核、发布主流程
     │   ├── preprocessing.py          # 关键帧、场景切分、音频预处理
@@ -179,7 +252,7 @@ python scripts/verify_demo.py
 
 ```text
 verification passed
-{'total': 3, 'published': 1, 'review': 2, 'rejected': 0}
+{'total': 3, 'published': 1, 'review': 2, 'rejected': 0, 'processing': 0}
 ```
 
 这表示系统已经完成三个短视频样本的生成、抽帧理解、本地 Qwen3-VL 调用、审核打标、入库和事件记录。验收脚本会检查 `backend == local_ollama_vlm`，如果模型没有真正运行会失败。
@@ -222,7 +295,69 @@ https://filesamples.com/samples/video/mp4/sample_640x360.mp4
 
 ---
 
-## 第二阶段：用 OpenCV 做工业级视频预处理
+## 第二阶段：上传可见与本地耐久队列
+
+这一阶段回答一个很实际的问题：视频上传后，用户为什么应该马上看到视频，而不是等待模型理解结束？
+
+短视频平台的体验要求是“先接收、先可见、后处理”。用户上传的视频文件已经到达平台时，网站应该先显示播放器和 `处理中` 状态；摘要、标签、审核分可以稍后补齐。这样做有三个好处：
+
+1. 用户能确认上传成功，不会因为模型推理耗时而误以为页面卡死。
+2. 上传服务不被模型延迟绑架，HTTP 请求可以快速返回。
+3. 审核任务可以排队、重试、恢复，系统更接近工业里的消息队列模型。
+
+本实验中，这个阶段由 `app/pipeline.py`、`app/job_queue.py` 和 `app/local_worker.py` 共同完成。
+
+上传入口先调用 `ingest_video()`。这个函数只做轻量工作：复制视频、写入 `processing` 记录、产生可观测事件。它不调用大模型。
+
+```python
+def ingest_video(self, video_path: Path, *, title: str | None = None, source: str = "local") -> dict:
+    """先持久化媒体文件和 processing 记录，让前端立即可见。"""
+    shutil.copy2(video_path, media_path)
+    record = {
+        "id": video_id,
+        "title": title,
+        "media_file": media_name,
+        "status": "processing",
+        "caption": "",
+        "tags": [],
+        "metrics": {"model": {"backend": "pending"}},
+    }
+    upsert_video(record)
+    add_event(video_id, "queued", "视频已进入页面，等待后台理解和打标签", {"status": "processing"})
+    return record
+```
+
+随后服务端把任务写入 SQLite `jobs` 表。这里的 SQLite 不是为了模拟数据库性能，而是为了模拟“任务进入队列”这个工业边界：
+
+```python
+job = enqueue_job(
+    "complete_video",
+    {"record": record, "simulate_stream": True},
+    job_id=f"complete-{record['id']}",
+)
+```
+
+`LocalReviewWorker` 在服务启动时运行。它不断从 `jobs` 表领取最早的 `queued` 任务，把状态改为 `running`，处理完成后改为 `done`。如果服务中途停止，下一次启动时会把遗留的 `running` 任务重新放回 `queued`，这就是本实验的轻量失败恢复。
+
+```python
+job = claim_next_job("local-review-worker")
+pipeline.complete_video(job["payload"]["record"])
+complete_job(job["id"])
+```
+
+本阶段的验证方法：
+
+```bash
+curl -X POST http://127.0.0.1:5050/api/demo
+curl http://127.0.0.1:5050/api/health
+curl http://127.0.0.1:5050/api/videos
+```
+
+预期现象是：`/api/demo` 很快返回，`/api/videos` 先看到 `processing` 视频，`/api/health` 中 `jobs.queued` 或 `jobs.running` 大于 0。稍等一段时间后，状态会更新为 `published` 或 `review`。
+
+---
+
+## 第三阶段：用 OpenCV 做工业级视频预处理
 
 核心代码在 `app/preprocessing.py` 和 `app/video_understanding.py`。真实短视频平台不会把整段视频每一帧都丢给大模型，这样成本太高、延迟太大。更常见的做法是先用 OpenCV/ffmpeg 做轻量预处理，抽取对理解最有价值的片段：
 
@@ -250,7 +385,7 @@ while True:
 
 ---
 
-## 第三阶段：下载并选择本地多模态理解模型
+## 第四阶段：下载并选择本地多模态理解模型
 
 模型候选定义在 `app/model_registry.py`。后台默认模型是 `Qwen3-VL 4B (Ollama)`，这是为了保证 16GB 内存的 Windows、Linux、macOS 电脑都尽量能跑通本地多模态链路。
 
@@ -327,7 +462,7 @@ python -m app.server
 
 ---
 
-## 第四阶段：视频理解、打标签与摘要生成
+## 第五阶段：视频理解、打标签与摘要生成
 
 多模态理解编排层在 `app/understanding_service.py`。它把关键帧、时间戳、技术指标、音频/OCR 占位信息组织成模型输入，并要求模型返回严格 JSON：
 
@@ -356,7 +491,7 @@ python -m app.server
 
 ---
 
-## 第五阶段：内容审核策略
+## 第六阶段：内容审核策略
 
 审核策略在 `moderate_analysis()` 中。它把理解结果转为平台发布决策：
 
@@ -392,7 +527,7 @@ if metrics["flash_ratio"] >= 0.15:
 
 ---
 
-## 第六阶段：发布到自建短视频 Demo 网站
+## 第七阶段：发布到自建短视频 Demo 网站
 
 启动网站：
 
@@ -409,10 +544,14 @@ http://127.0.0.1:5050
 网站提供：
 
 - 状态统计：全部、已发布、复核、拒绝。
-- 模型选择：后台选择 Qwen、MiniCPM、InternVL 或本地 baseline。
+- 模型选择：后台选择 Qwen、Gemma、MiniCPM 或本地 baseline。
 - 视频信息流：视频播放器、标签、摘要、风险分、审核理由。
 - 上传入口：上传本地 MP4/MOV/WEBM 后自动进入处理链路。
-- 流处理事件：实时展示 ingest、frame_sample、understanding、moderation、publish 等事件。
+- 流处理事件：实时展示 ingest、queued、worker、frame_sample、understanding、moderation、publish 等事件。
+
+上传交互采用“两阶段可见”设计：服务端先复制视频文件并写入一条 `processing` 记录，前端立即显示真实视频播放器；随后服务端把审核任务写入 SQLite `jobs` 本地耐久队列，由 `LocalReviewWorker` 异步消费并完成理解、标签和审核。等待期间只在摘要和标签区域显示 loading 占位符，视频未播放时仍显示真实媒体区域，不使用 loading 占位图遮挡视频。
+
+这是一种“工业轻量版”折中：学生电脑默认不需要 Kafka、MinIO、Flink 或 Paimon 也能跑通；但系统边界已经按照工业里的上传服务、任务队列、审核 worker、模型服务、元数据存储来组织。课堂或教师机具备 Docker 环境时，可以把 SQLite jobs 替换为 Kafka 主题，把本地 `data/media` 替换为 MinIO，把审核结果写入 Paimon 或 ClickHouse。
 
 核心 API：
 
@@ -431,9 +570,9 @@ http://127.0.0.1:5050
 
 ---
 
-## 第七阶段：接入 Kafka 视频进入事件
+## 第八阶段：接入 Kafka 视频进入事件
 
-前五个阶段可以不依赖 Kafka，适合快速验证网站和审核链路。若要贴近前三章的流处理架构，请启动 Kafka 并运行生产者/消费者脚本。
+前七个阶段可以不依赖 Kafka，适合快速验证网站和审核链路。若要贴近前三章的流处理架构，请启动 Kafka 并运行生产者/消费者脚本。
 
 ### 1. 启动 Kafka
 
@@ -502,7 +641,7 @@ python scripts/kafka_video_producer.py
 
 ---
 
-## 第八阶段：观察、测试与迭代
+## 第九阶段：观察、测试与迭代
 
 ### 1. 本地流水线测试
 
@@ -539,7 +678,8 @@ curl http://127.0.0.1:5050/api/events
 
 同学们可以选择一个方向继续增强：
 
-- 把 SQLite 换成 PostgreSQL，增加审核任务表。
+- 把 SQLite `jobs` 本地队列换成 Kafka 或 Pulsar。
+- 把 SQLite `videos/events` 换成 PostgreSQL、ClickHouse 或 Paimon。
 - 把视频文件上传到 MinIO，并只在数据库中保存对象存储 URL。
 - 把帧级指标写入 Paimon，进行离线统计和热榜分析。
 - 接入 OCR/ASR，审核画面文字和音频文本。
@@ -553,7 +693,14 @@ curl http://127.0.0.1:5050/api/events
 
 ### 1. 主流水线 `app/pipeline.py`
 
-`ShortVideoPipeline.process_video()` 是端到端主流程：
+`ShortVideoPipeline.ingest_video()` 负责上传入口的快速返回：它把视频复制到媒体区，写入 `processing` 记录，让网站马上能展示真实视频。昂贵的理解和审核工作放到 `complete_video()` 中，由 worker 异步调用：
+
+```python
+record = pipeline.ingest_video(path, title=title, source="browser-upload")
+enqueue_job("complete_video", {"record": record, "simulate_stream": True})
+```
+
+worker 消费任务后再执行：
 
 ```python
 analysis = self.model.analyze(
@@ -569,12 +716,13 @@ upsert_video(record)
 add_event(video_id, "publish", publish_message, {"status": moderation["status"]})
 ```
 
-它完成四件事：
+它完成五件事：
 
 1. 将上传文件复制到媒体区。
-2. 调用 `MultimodalUnderstandingService` 完成关键帧预处理、模型选择、Ollama 本地多模态模型调用或 OpenCV 兜底。
-3. 调用审核策略，将 VLM 风险和平台规则合并。
-4. 将最终结果写入 SQLite，并发布到网站 API。
+2. 写入 `processing` 视频记录，保证前端先显示视频。
+3. 将 `complete_video` 任务写入 SQLite `jobs` 队列。
+4. `LocalReviewWorker` 调用 `MultimodalUnderstandingService` 完成关键帧预处理、模型选择、Ollama 本地多模态模型调用或 OpenCV 兜底。
+5. 调用审核策略，将 VLM 风险和平台规则合并，并将最终结果写回 SQLite。
 
 ### 2. 多模型理解服务 `app/understanding_service.py`
 
@@ -587,23 +735,37 @@ vlm_payload = self.local_vlm_client.analyze_video(...)
 
 这层是实验升级后的核心。它不把模型名称写死在流水线里，而是从 `model_registry.py` 读取当前后台选择；如果 Ollama 未启动或模型未下载，则记录 `local_model_fallback` 并用本地 baseline 保持演示链路可运行。
 
-### 3. 网站服务 `app/server.py`
+### 3. 本地任务队列与 worker
+
+`app/job_queue.py` 提供 `enqueue_job()`、`claim_next_job()`、`complete_job()` 和 `fail_job()`。它用 SQLite 表模拟工业系统里的消息队列，具备本地耐久性：服务重启后，未完成任务可以重新进入队列。
+
+`app/local_worker.py` 是单进程 worker，它在 FastAPI 启动时随服务启动：
+
+```python
+job = claim_next_job("local-review-worker")
+pipeline.complete_video(job["payload"]["record"])
+complete_job(job["id"])
+```
+
+这比直接在请求线程里跑模型更接近工业界的上传服务/审核 worker 解耦方式，同时仍然适合普通学生电脑。
+
+### 4. 网站服务 `app/server.py`
 
 FastAPI 提供页面、媒体访问和 JSON API：
 
 ```python
-app = FastAPI(title="Short Video Stream Review Demo")
+app = FastAPI(title="Short Video Stream Review Demo", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 @app.post("/api/demo")
-def api_demo(background_tasks: BackgroundTasks, overwrite: bool = False):
-    started = _start_background_job(background_tasks, _process_demo, overwrite)
-    if not started:
+def api_demo(overwrite: bool = False):
+    if has_active_jobs():
         raise HTTPException(status_code=409, detail="pipeline is already running")
-    return {"started": True, "processing": True}
+    jobs = _enqueue_demo(overwrite)
+    return {"started": True, "processing": True, "queued": len(jobs)}
 ```
 
-这里使用后台任务，是为了让网站触发样本流后仍能继续刷新事件列表，观察处理过程。
+这里不再把模型推理挂在请求线程或临时后台任务上，而是写入本地耐久队列，再由 worker 消费。网站可以持续刷新事件列表，观察 `queued`、`worker`、`understanding`、`moderation`、`publish` 的完整过程。
 
 模型选择 API 也在这一层：
 
@@ -614,7 +776,7 @@ def api_select_model(selection: ModelSelectionRequest):
     return {"active": active.to_dict()}
 ```
 
-### 4. Kafka 脚本
+### 5. Kafka 脚本
 
 `scripts/kafka_video_producer.py` 只发送视频进入事件；`scripts/kafka_ai_consumer.py` 才负责真正处理视频。这种拆分体现了消息队列的核心价值：上传侧和 AI 审核侧解耦。
 

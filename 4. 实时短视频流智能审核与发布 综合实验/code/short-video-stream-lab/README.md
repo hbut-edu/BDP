@@ -1,12 +1,14 @@
 # 短视频流智能审核发布 Demo
 
-本工程实现一个单机可运行的短视频内容平台流水线：
+本工程实现一个单机可运行、同时尽量贴近工业界方案的短视频内容平台流水线：
 
 1. 短视频进入本地媒体区或 Kafka 主题。
-2. OpenCV 做关键帧、场景切分、运动峰值采样和音频轨抽取。
-3. 可选的多模态 VLM 对关键帧、时间戳、技术指标和 ASR/OCR 上下文做结构化理解。
+2. 上传服务先保存媒体文件和 `processing` 元数据，再把审核任务写入本地耐久队列。
+3. 本地 worker 异步消费队列任务，调用 OpenCV 和 Ollama 多模态模型。
 4. 审核策略根据 VLM 风险、视觉信号和标题风险词给出 `published`、`review`、`rejected`。
-5. FastAPI 提供 API 和 Demo 网站，展示视频、标签、摘要、审核理由、模型选择和流处理事件。
+5. FastAPI 提供 API 和 Demo 网站，展示视频、标签、摘要、审核理由、模型选择、队列状态和流处理事件。
+
+默认模式使用 `SQLite jobs` 模拟工业系统中的消息队列，学生不安装 Docker/Kafka 也能跑通；如果课堂环境具备 Kafka，可以使用 `scripts/kafka_*` 脚本把同一条链路切到真实消息队列。
 
 ## 快速运行
 
@@ -40,6 +42,29 @@ http://127.0.0.1:5050
 ```
 
 默认后台模型是 `Qwen3-VL 4B (Ollama)`。所有主要候选都通过 Ollama 下载到学生本机，Windows、Linux、macOS 使用同一套本地 API。`scripts/verify_demo.py` 会严格检查真实本地 VLM 是否被调用；若只想在课堂上保底演示，也可以在网站后台选择 `local-baseline`。
+
+上传视频时，网站会先把真实视频文件写入媒体区并显示在信息流中，状态为 `处理中`。后台再异步执行理解、打标签和审核；等待期间只有摘要和标签位置显示 loading 占位符，视频播放器本身不会被 loading 遮挡。
+
+为了兼顾学生电脑可运行和工业架构思维，本实验默认采用“工业轻量版”：
+
+| 工业组件 | 教学默认实现 | 可替换方向 |
+| --- | --- | --- |
+| 对象存储 | 本地 `data/media` | MinIO/S3/OSS |
+| 消息队列 | SQLite `jobs` 表 + 本地 worker | Kafka/Pulsar |
+| 元数据存储 | SQLite `videos/events/jobs` | PostgreSQL/ClickHouse/Paimon |
+| 模型服务 | Ollama 本地 HTTP API | vLLM/SGLang/Triton/KServe |
+| 流批分析 | 事件日志 + 可选 Kafka 脚本 | Flink/Paimon/Spark |
+
+观察异步队列链路：
+
+```bash
+curl -X POST "http://127.0.0.1:5050/api/demo?overwrite=true"
+curl http://127.0.0.1:5050/api/health
+curl http://127.0.0.1:5050/api/videos
+curl http://127.0.0.1:5050/api/events
+```
+
+刚触发样本流时，`/api/health` 会显示 `jobs.queued` 或 `jobs.running` 大于 0，视频状态会先是 `processing`；worker 完成后，状态会变成 `published` 或 `review`。
 
 ## 模型候选
 

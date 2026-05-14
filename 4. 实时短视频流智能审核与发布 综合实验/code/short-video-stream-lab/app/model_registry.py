@@ -1,3 +1,9 @@
+"""Registry of selectable local video-language model candidates.
+
+所有模型候选集中写在这里，前端、下载脚本和理解服务共用同一份配置。
+这种注册表模式可以避免“前端显示一个模型，后端实际调用另一个模型”的教学事故。
+"""
+
 from dataclasses import asdict, dataclass
 from typing import Literal
 
@@ -9,6 +15,8 @@ ModelMode = Literal["local_ollama_vlm", "local_baseline"]
 
 @dataclass(frozen=True)
 class ModelCandidate:
+    """Metadata describing one model option shown in the backend selector."""
+
     id: str
     name: str
     family: str
@@ -26,9 +34,12 @@ class ModelCandidate:
     notes: str
 
     def to_dict(self) -> dict:
+        """Serialize model metadata for API responses and event logs."""
         return asdict(self)
 
 
+# 候选模型按 16GB 和 32GB 两档组织。默认选择 qwen3-vl-4b-ollama，
+# 既保留较强多模态能力，又尽量降低学生电脑无法运行的概率。
 MODEL_CANDIDATES: dict[str, ModelCandidate] = {
     "qwen3-vl-4b-ollama": ModelCandidate(
         id="qwen3-vl-4b-ollama",
@@ -187,22 +198,25 @@ MODEL_CANDIDATES: dict[str, ModelCandidate] = {
 
 
 def list_model_candidates() -> list[dict]:
+    """Return every candidate as dictionaries for `/api/models`."""
     return [candidate.to_dict() for candidate in MODEL_CANDIDATES.values()]
 
 
 def get_model_candidate(model_id: str | None) -> ModelCandidate:
+    """Resolve a model id, falling back to the course default when missing."""
     if model_id and model_id in MODEL_CANDIDATES:
         return MODEL_CANDIDATES[model_id]
     return MODEL_CANDIDATES[DEFAULT_MODEL_ID]
 
 
 def get_active_model() -> ModelCandidate:
+    """Read the currently selected model from SQLite settings."""
     return get_model_candidate(get_setting("active_model_id", DEFAULT_MODEL_ID))
 
 
 def set_active_model(model_id: str) -> ModelCandidate:
+    """Persist the selected model id after validating it exists in the registry."""
     if model_id not in MODEL_CANDIDATES:
         raise ValueError(f"unknown model id: {model_id}")
     set_setting("active_model_id", model_id)
     return MODEL_CANDIDATES[model_id]
-

@@ -1,3 +1,9 @@
+"""Small FFmpeg/FFprobe helpers used by preprocessing and media publishing.
+
+本实验把媒体处理委托给 FFmpeg：它是工业界事实标准，跨平台且对 MP4/MOV/WebM 支持稳定。
+Python 代码只负责拼接命令、解析结果和把错误变成学生能理解的信息。
+"""
+
 import json
 import shutil
 import subprocess
@@ -20,6 +26,11 @@ def require_ffmpeg() -> None:
 
 
 def _parse_fraction(value: str | None) -> float:
+    """Parse ffprobe frame-rate fractions such as `30000/1001`.
+
+    ffprobe 返回的 avg_frame_rate 不一定是普通小数。这里做防御式解析，
+    防止异常素材让整个服务因为一个 metadata 字段崩溃。
+    """
     if not value or value == "0/0":
         return 0.0
     if "/" in value:
@@ -36,7 +47,11 @@ def _parse_fraction(value: str | None) -> float:
 
 
 def probe_video(path: Path) -> dict:
-    """Return basic video metadata from ffprobe as a plain dictionary."""
+    """Return basic video metadata from ffprobe as a plain dictionary.
+
+    这些字段会被 baseline、关键帧预处理和报告截图共同使用。
+    统一从 ffprobe 读取可以避免 OpenCV 在不同系统上读到的 metadata 不一致。
+    """
     require_ffmpeg()
     command = [
         "ffprobe",
@@ -74,7 +89,10 @@ def probe_video(path: Path) -> dict:
 
 
 def scaled_size(width: int, height: int, target_width: int) -> tuple[int, int]:
-    """Compute an even ffmpeg-friendly scaled size while preserving aspect ratio."""
+    """Compute an even ffmpeg-friendly scaled size while preserving aspect ratio.
+
+    很多视频编码器要求宽高为偶数；这里强制高度为偶数，减少跨平台编码问题。
+    """
     if width <= 0 or height <= 0:
         return target_width, target_width
     scaled_height = max(2, int(round(height * target_width / width)))
@@ -90,7 +108,11 @@ def iter_sampled_frames(
     max_frames: int,
     analysis_width: int,
 ) -> Iterator[np.ndarray]:
-    """Yield RGB frames sampled from a video by streaming raw frames from ffmpeg."""
+    """Yield RGB frames sampled from a video by streaming raw frames from ffmpeg.
+
+    这个生成器不会一次性把视频全部读入内存，而是按帧流式读取。
+    对短视频实验来说这更接近真实流处理，也能降低学生电脑的内存压力。
+    """
     metadata = probe_video(path)
     width, height = scaled_size(metadata["width"], metadata["height"], analysis_width)
     frame_size = width * height * 3
@@ -114,6 +136,7 @@ def iter_sampled_frames(
     yielded = 0
     try:
         while yielded < max_frames:
+            # 每次读取固定大小的 raw RGB 帧；不足一帧说明视频流结束。
             chunk = process.stdout.read(frame_size)
             if len(chunk) < frame_size:
                 break
@@ -129,7 +152,10 @@ def iter_sampled_frames(
 
 
 def create_thumbnail(video_path: Path, thumbnail_path: Path) -> None:
-    """Extract a middle-ish frame as a JPEG thumbnail for the website."""
+    """Extract an early frame as a JPEG thumbnail for the website.
+
+    封面失败不应该阻断审核主流程，因此调用方会捕获 FFmpegError 并继续发布结果。
+    """
     require_ffmpeg()
     thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -153,7 +179,10 @@ def create_thumbnail(video_path: Path, thumbnail_path: Path) -> None:
 
 
 def extract_audio_track(video_path: Path, audio_path: Path) -> bool:
-    """Extract a mono 16 kHz wav track for ASR, returning False when no audio exists."""
+    """Extract a mono 16 kHz wav track for ASR, returning False when no audio exists.
+
+    当前实验不内置 ASR 模型，但保留音频抽取产物，方便教师后续扩展“视频 + 音频”理解。
+    """
     require_ffmpeg()
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     command = [

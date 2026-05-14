@@ -1,3 +1,10 @@
+"""Video preprocessing for multimodal understanding.
+
+多模态模型通常不能直接吃完整视频文件，尤其是在 16GB 学生电脑上。
+本模块把视频转换为一组代表性关键帧、基础 metadata 和可选音频轨，
+让后续 Ollama VLM 只处理小而有信息量的输入。
+"""
+
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -20,6 +27,8 @@ EventCallback = Callable[[str | None, str, str, dict | None], None]
 
 @dataclass
 class KeyFrame:
+    """Metadata for one frame selected as a VLM input image."""
+
     frame_index: int
     timestamp_sec: float
     file: str
@@ -29,21 +38,28 @@ class KeyFrame:
     scene_change: float
 
     def to_dict(self) -> dict:
+        """Serialize the dataclass for JSON storage and model prompts."""
         return asdict(self)
 
 
 def _resize_for_vlm(frame: np.ndarray) -> np.ndarray:
+    """Resize a BGR OpenCV frame to the width expected by local VLM prompts."""
     height, width = frame.shape[:2]
     target_height = max(2, int(round(height * VLM_FRAME_WIDTH / max(1, width))))
     return cv2.resize(frame, (VLM_FRAME_WIDTH, target_height), interpolation=cv2.INTER_AREA)
 
 
 def _brightness(gray: np.ndarray) -> float:
+    """Return average grayscale brightness as a simple explainable signal."""
     return float(np.mean(gray))
 
 
 class VideoPreprocessor:
-    """Extract industrial-style artifacts before calling a VLM."""
+    """Extract industrial-style artifacts before calling a VLM.
+
+    核心策略是“均匀抽样 + 场景切换 + 运动峰值”：既覆盖整个时间线，
+    又尽量保留短视频中最可能包含语义变化的帧。
+    """
 
     def prepare(
         self,
@@ -52,6 +68,10 @@ class VideoPreprocessor:
         video_id: str,
         emit_event: EventCallback | None = None,
     ) -> dict:
+        """Create keyframes, optional audio, and metadata for one video.
+
+        返回值会同时供 Ollama prompt、报告事件和最终 metrics 使用。
+        """
         frame_dir = FRAME_DIR / video_id
         frame_dir.mkdir(parents=True, exist_ok=True)
         audio_path = AUDIO_DIR / f"{video_id}.wav"
@@ -66,6 +86,7 @@ class VideoPreprocessor:
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
+        # 先保证一部分帧来自均匀时间采样，避免只选到运动峰值而丢失视频上下文。
         uniform_interval = max(1, int(frame_count / max(1, MAX_VLM_KEYFRAMES // 2)))
         candidates: list[dict] = []
         previous_gray: np.ndarray | None = None
@@ -86,6 +107,7 @@ class VideoPreprocessor:
                 motion = float(np.mean(diff))
                 scene_change = float(np.percentile(diff, 95))
 
+            # reason 记录“为什么选择这帧”，报告和 timeline 会展示这个可解释证据。
             reason = ""
             if frame_index == 0:
                 reason = "first_frame"
@@ -114,6 +136,7 @@ class VideoPreprocessor:
         selected = self._select_keyframes(candidates)
         keyframes: list[KeyFrame] = []
         for order, item in enumerate(selected, start=1):
+            # 落盘为 JPEG 是为了能直接传给 Ollama，也方便学生在 data/media/frames 下查看。
             output_path = frame_dir / f"keyframe-{order:02d}-{item['frame_index']}.jpg"
             resized = _resize_for_vlm(item["frame"])
             cv2.imwrite(str(output_path), resized, [cv2.IMWRITE_JPEG_QUALITY, 88])
@@ -160,6 +183,11 @@ class VideoPreprocessor:
         }
 
     def _select_keyframes(self, candidates: list[dict]) -> list[dict]:
+        """Choose a bounded, chronological set of frames from all candidates.
+
+        超过上限时优先保留首帧、明显场景切换、运动峰值和均匀样本。
+        最后按 frame_index 排序，是为了让 prompt 中的时间线和视频顺序一致。
+        """
         if len(candidates) <= MAX_VLM_KEYFRAMES:
             return candidates
 
@@ -187,4 +215,3 @@ class VideoPreprocessor:
                 if len(selected) >= MAX_VLM_KEYFRAMES:
                     return sorted(selected, key=lambda frame: frame["frame_index"])
         return sorted(selected, key=lambda frame: frame["frame_index"])
-

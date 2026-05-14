@@ -1,3 +1,9 @@
+"""Generate small deterministic demo videos for the lab.
+
+课堂环境不应该依赖外网素材是否还能下载，因此这里用 NumPy 合成三类竖屏短视频：
+校园运动、低照度场景和强闪烁片段。它们分别覆盖正常发布、复核和风险提示场景。
+"""
+
 import subprocess
 from pathlib import Path
 
@@ -8,6 +14,7 @@ from .ffmpeg_tools import FFmpegError, require_ffmpeg
 
 
 def _draw_circle(frame: np.ndarray, cx: int, cy: int, radius: int, color: tuple[int, int, int]) -> None:
+    """Paint a filled circle into an RGB frame using a vectorized NumPy mask."""
     yy, xx = np.ogrid[: frame.shape[0], : frame.shape[1]]
     mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius**2
     frame[mask] = color
@@ -21,10 +28,15 @@ def _draw_rect(
     y1: int,
     color: tuple[int, int, int],
 ) -> None:
+    """Paint a filled rectangle while clipping coordinates to the frame boundary."""
     frame[max(0, y0) : min(frame.shape[0], y1), max(0, x0) : min(frame.shape[1], x1)] = color
 
 
 def _campus_sports_frame(index: int, total: int, width: int, height: int) -> np.ndarray:
+    """Build one bright outdoor sports frame.
+
+    这个样本用于模拟“低风险、可发布”的普通校园短视频：画面较亮、有运动、有户外色彩。
+    """
     y = np.linspace(0, 1, height, dtype=np.float32)[:, None]
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     frame[:, :, 0] = (65 + 35 * (1 - y)).astype(np.uint8)
@@ -43,6 +55,7 @@ def _campus_sports_frame(index: int, total: int, width: int, height: int) -> np.
 
 
 def _night_scene_frame(index: int, total: int, width: int, height: int) -> np.ndarray:
+    """Build one dark street-scene frame used to trigger low-light review signals."""
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     frame[:, :, :] = (8, 12, 24)
     progress = index / max(1, total - 1)
@@ -56,6 +69,7 @@ def _night_scene_frame(index: int, total: int, width: int, height: int) -> np.nd
 
 
 def _flashy_frame(index: int, total: int, width: int, height: int) -> np.ndarray:
+    """Build one high-contrast flashing frame used to test viewer-discomfort rules."""
     palette = [
         (245, 245, 245),
         (12, 16, 32),
@@ -94,7 +108,11 @@ def create_demo_video(
     fps: int = 24,
     overwrite: bool = False,
 ) -> Path:
-    """Create a small vertical MP4 using generated RGB frames."""
+    """Create a small vertical MP4 using generated RGB frames.
+
+    ffmpeg 从 stdin 接收 raw RGB 帧并编码为 H.264 MP4。这样不需要 OpenCV 编码器支持，
+    在 Windows、Linux、macOS 上更稳定，也更接近媒体管线中“帧流 -> 编码文件”的过程。
+    """
     require_ffmpeg()
     if output_path.exists() and not overwrite:
         return output_path
@@ -129,6 +147,7 @@ def create_demo_video(
     assert process.stdin is not None
     try:
         for index in range(total_frames):
+            # 逐帧写入 ffmpeg stdin，模拟实时视频帧不断进入编码器。
             frame = builder(index, total_frames, width, height)
             process.stdin.write(frame.tobytes())
     finally:
@@ -141,7 +160,11 @@ def create_demo_video(
 
 
 def ensure_demo_videos(overwrite: bool = False) -> list[dict]:
-    """Create the three local demo videos and return ingestion descriptors."""
+    """Create the three local demo videos and return ingestion descriptors.
+
+    返回的 descriptor 会被 `/api/demo` 当作“视频进入事件”送入 pipeline，
+    因此脚本和网站共用同一批可复现实验素材。
+    """
     ensure_directories()
     videos = []
     for kind, title in DEMO_TITLES.items():
@@ -149,4 +172,3 @@ def ensure_demo_videos(overwrite: bool = False) -> list[dict]:
         create_demo_video(path, kind=kind, overwrite=overwrite)
         videos.append({"path": path, "title": title, "source": "generated-demo"})
     return videos
-

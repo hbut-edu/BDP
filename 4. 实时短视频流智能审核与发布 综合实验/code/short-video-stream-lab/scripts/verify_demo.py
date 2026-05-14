@@ -1,6 +1,13 @@
+"""One-command verification for the short-video review lab.
+
+本脚本用于提交前自检和助教快速验收：它清空运行状态、选择默认 Qwen3-VL 4B、
+处理三段样本视频，并断言结果中包含标签、摘要、关键帧和本地 VLM 后端信息。
+"""
+
 from pathlib import Path
 import sys
 
+# 允许直接执行 `python scripts/verify_demo.py`。
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -11,7 +18,9 @@ from app.storage import clear_db, list_events, list_videos, stats  # noqa: E402
 
 
 def main() -> None:
+    """Run deterministic checks and fail fast if the required lab path is broken."""
     clear_db()
+    # 验收默认要求使用 Qwen3-VL 4B；如果模型未下载，本脚本会暴露 fallback 或失败问题。
     set_active_model("qwen3-vl-4b-ollama")
     pipeline = ShortVideoPipeline()
     for item in ensure_demo_videos(overwrite=True):
@@ -24,6 +33,7 @@ def main() -> None:
 
     videos = list_videos()
     current_stats = stats()
+    # 下面的断言覆盖“数量、状态、事件、标签、摘要、抽帧、模型后端、预处理”。
     assert len(videos) == 3, f"expected 3 videos, got {len(videos)}"
     assert current_stats["published"] >= 1, current_stats
     assert current_stats["review"] >= 1, current_stats

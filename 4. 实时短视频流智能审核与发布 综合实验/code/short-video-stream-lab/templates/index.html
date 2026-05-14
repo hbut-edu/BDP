@@ -1,12 +1,18 @@
 <!doctype html>
 <html lang="zh-CN">
   <head>
+    <!--
+      FastAPI 渲染的单页 Demo。页面本身不包含业务数据，
+      所有状态都由 static/app.js 调用 JSON API 后动态渲染。
+    -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>短视频流智能审核发布 Demo</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <!-- 查询参数用于课堂迭代时绕开浏览器缓存，确保同学刷新后拿到最新 CSS。 -->
+    <link rel="stylesheet" href="/static/styles.css?v=20260514-async-video" />
   </head>
   <body>
+    <!-- 顶部操作区：运行内置样本流或清空 SQLite 演示状态。 -->
     <header class="topbar">
       <div>
         <h1>短视频审核发布台</h1>
@@ -19,6 +25,7 @@
     </header>
 
     <main class="layout">
+      <!-- 状态概览：这些数字来自 /api/videos 的 stats 字段。 -->
       <section class="panel metrics" aria-label="状态概览">
         <div>
           <span class="label">全部</span>
@@ -38,6 +45,7 @@
         </div>
       </section>
 
+      <!-- 上传表单：视频文件和标题会以 multipart/form-data 发送到 /api/upload。 -->
       <section class="panel upload-panel" aria-label="上传短视频">
         <form id="uploadForm">
           <input id="titleInput" name="title" type="text" placeholder="视频标题" />
@@ -47,6 +55,7 @@
         <span id="statusText" class="status-text">空闲</span>
       </section>
 
+      <!-- 模型选择：候选项来自后端模型注册表，切换后写入 SQLite settings。 -->
       <section class="panel model-panel" aria-label="模型选择">
         <div>
           <label for="modelSelect">后台理解模型</label>
@@ -55,6 +64,7 @@
         <div id="modelDetails" class="model-details"></div>
       </section>
 
+      <!-- 前端筛选按钮：只过滤当前视频列表，不改变后端数据。 -->
       <section class="tabs" aria-label="视频筛选">
         <button class="tab active" data-filter="all" type="button">全部</button>
         <button class="tab" data-filter="published" type="button">已发布</button>
@@ -62,8 +72,10 @@
         <button class="tab" data-filter="rejected" type="button">已拒绝</button>
       </section>
 
+      <!-- 视频卡片容器：JS 会复用已有 video 节点，避免轮询刷新打断播放。 -->
       <section id="videoGrid" class="video-grid" aria-live="polite"></section>
 
+      <!-- 事件流面板：帮助同学观察 ingest、queued、worker、understanding、publish 等阶段。 -->
       <section class="panel event-panel">
         <div class="section-title">
           <h2>流处理事件</h2>
@@ -73,6 +85,7 @@
       </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <!-- 查询参数同样用于绕开 JS 缓存，尤其是修复播放器刷新问题后需要强制更新。 -->
+    <script src="/static/app.js?v=20260514-stable-video"></script>
   </body>
 </html>
