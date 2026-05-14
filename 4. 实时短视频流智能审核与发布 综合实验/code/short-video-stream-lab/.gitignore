@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+data/incoming/*.mp4
+data/incoming/*.mov
+data/incoming/*.m4v
+data/incoming/*.webm
+data/media/*
+data/state/*
+data/models/*

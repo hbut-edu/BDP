@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>短视频流智能审核发布 Demo</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>短视频审核发布台</h1>
+        <p>实时理解、审核、打标签、发布</p>
+      </div>
+      <div class="actions">
+        <button id="runDemo" type="button">运行样本流</button>
+        <button id="resetDemo" type="button" class="secondary">清空状态</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel metrics" aria-label="状态概览">
+        <div>
+          <span class="label">全部</span>
+          <strong id="totalCount">0</strong>
+        </div>
+        <div>
+          <span class="label">已发布</span>
+          <strong id="publishedCount">0</strong>
+        </div>
+        <div>
+          <span class="label">复核</span>
+          <strong id="reviewCount">0</strong>
+        </div>
+        <div>
+          <span class="label">拒绝</span>
+          <strong id="rejectedCount">0</strong>
+        </div>
+      </section>
+
+      <section class="panel upload-panel" aria-label="上传短视频">
+        <form id="uploadForm">
+          <input id="titleInput" name="title" type="text" placeholder="视频标题" />
+          <input id="videoInput" name="video" type="file" accept="video/mp4,video/webm,video/quicktime" />
+          <button type="submit">上传处理</button>
+        </form>
+        <span id="statusText" class="status-text">空闲</span>
+      </section>
+
+      <section class="panel model-panel" aria-label="模型选择">
+        <div>
+          <label for="modelSelect">后台理解模型</label>
+          <select id="modelSelect"></select>
+        </div>
+        <div id="modelDetails" class="model-details"></div>
+      </section>
+
+      <section class="tabs" aria-label="视频筛选">
+        <button class="tab active" data-filter="all" type="button">全部</button>
+        <button class="tab" data-filter="published" type="button">已发布</button>
+        <button class="tab" data-filter="review" type="button">待复核</button>
+        <button class="tab" data-filter="rejected" type="button">已拒绝</button>
+      </section>
+
+      <section id="videoGrid" class="video-grid" aria-live="polite"></section>
+
+      <section class="panel event-panel">
+        <div class="section-title">
+          <h2>流处理事件</h2>
+          <span id="processingBadge" class="badge">idle</span>
+        </div>
+        <ol id="eventList" class="event-list"></ol>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

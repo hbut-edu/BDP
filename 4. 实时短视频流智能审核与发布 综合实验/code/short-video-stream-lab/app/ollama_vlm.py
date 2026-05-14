@@ -1,0 +1,175 @@
+import base64
+import json
+import re
+from pathlib import Path
+
+import requests
+
+from .config import (
+    LOCAL_VLM_MAX_IMAGES,
+    LOCAL_VLM_MAX_TOKENS,
+    LOCAL_VLM_TIMEOUT_SEC,
+    OLLAMA_BASE_URL,
+)
+from .model_registry import ModelCandidate
+
+
+class OllamaModelError(RuntimeError):
+    """Raised when local Ollama is unavailable or the model cannot produce JSON."""
+
+
+def _extract_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _image_base64(path: str) -> str:
+    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+
+
+def _representative_frames(frames: list[dict], limit: int) -> list[dict]:
+    if len(frames) <= limit:
+        return frames
+    if limit <= 1:
+        return frames[:1]
+    indexes = [round(index * (len(frames) - 1) / (limit - 1)) for index in range(limit)]
+    return [frames[index] for index in indexes]
+
+
+class OllamaVLMClient:
+    """Use Ollama's local HTTP API for cross-platform multimodal inference."""
+
+    def __init__(self, base_url: str = OLLAMA_BASE_URL) -> None:
+        self.base_url = base_url.rstrip("/")
+
+    def list_local_models(self) -> set[str]:
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=3)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise OllamaModelError(
+                f"Ollama is not reachable at {self.base_url}. Start Ollama first."
+            ) from exc
+        payload = response.json()
+        names = set()
+        for model in payload.get("models", []):
+            name = model.get("name")
+            if name:
+                names.add(name)
+                names.add(name.split(":")[0])
+        return names
+
+    def is_model_available(self, model_name: str) -> bool:
+        return model_name in self.list_local_models()
+
+    def analyze_video(
+        self,
+        *,
+        candidate: ModelCandidate,
+        title: str,
+        preprocess: dict,
+        local_metrics: dict,
+    ) -> dict:
+        if not self.is_model_available(candidate.ollama_model):
+            raise OllamaModelError(
+                f"Ollama model is not downloaded: {candidate.ollama_model}. "
+                f"Run: {candidate.pull_command}"
+            )
+
+        selected_frames = _representative_frames(
+            preprocess.get("keyframes", []),
+            max(1, LOCAL_VLM_MAX_IMAGES),
+        )
+        images = [_image_base64(frame["file"]) for frame in selected_frames]
+        if not images:
+            raise OllamaModelError("no keyframes available for Ollama inference")
+
+        payload = {
+            "model": candidate.ollama_model,
+            "stream": False,
+            "think": False,
+            "format": "json",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": self._prompt(title, preprocess, local_metrics, selected_frames),
+                    "images": images,
+                }
+            ],
+            "options": {
+                "temperature": 0,
+                "num_predict": LOCAL_VLM_MAX_TOKENS,
+            },
+        }
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=LOCAL_VLM_TIMEOUT_SEC,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise OllamaModelError(f"Ollama chat failed: {exc}") from exc
+
+        content = response.json().get("message", {}).get("content", "")
+        try:
+            return _extract_json(content)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise OllamaModelError(f"Ollama returned non-JSON content: {content[-1200:]}") from exc
+
+    def _prompt(
+        self,
+        title: str,
+        preprocess: dict,
+        local_metrics: dict,
+        selected_frames: list[dict],
+    ) -> str:
+        keyframes = [
+            {
+                "timestamp_sec": frame["timestamp_sec"],
+                "reason": frame["reason"],
+                "brightness": frame["brightness"],
+                "motion": frame["motion"],
+                "scene_change": frame["scene_change"],
+            }
+            for frame in selected_frames
+        ]
+        metadata = preprocess.get("metadata", {})
+        compact_metrics = {
+            "brightness": local_metrics.get("brightness"),
+            "motion": local_metrics.get("motion"),
+            "flash_count": local_metrics.get("flash_count"),
+            "flash_ratio": local_metrics.get("flash_ratio"),
+            "red_ratio_avg": local_metrics.get("red_ratio_avg"),
+            "green_ratio_avg": local_metrics.get("green_ratio_avg"),
+            "blue_ratio_avg": local_metrics.get("blue_ratio_avg"),
+        }
+        context = {
+            "title": title,
+            "metadata": {
+                "width": metadata.get("width"),
+                "height": metadata.get("height"),
+                "fps": metadata.get("fps"),
+                "duration_sec": metadata.get("duration_sec"),
+            },
+            "keyframes": keyframes,
+            "local_metrics": compact_metrics,
+        }
+        return (
+            "/no_think\n"
+            "你是短视频内容理解与审核模型。请直接输出合法 JSON，不要解释。"
+            "JSON 字段固定为：summary(string), timeline(array), visible_text(array), "
+            "audio_summary(string), entities(array), actions(array), tags(array), risk(object)。"
+            "timeline 元素使用 {start,end,event,evidence}。"
+            "risk 使用 {level,score,categories,evidence}，level 只能是 pass、review 或 reject。"
+            f"输入信息：{json.dumps(context, ensure_ascii=False)}"
+        )
