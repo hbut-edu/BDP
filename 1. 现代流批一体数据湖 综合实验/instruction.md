@@ -47,10 +47,11 @@
 ### 核心依赖共享夹准备 (双方案均需执行)
 1. 在电脑任意位置新建一个主文件夹，命名为 `bigdata-lab`。**接下来的所有操作均在此文件夹内完成。**
 2. 在 `bigdata-lab` 内部，新建一个名为 `flink-jars` 的文件夹。
-3. 请通过浏览器或 Maven 仓库，下载以下 **3 个核心 Jar 包**，并放入 `flink-jars` 文件夹中（这些包将挂载给 Docker，让集群认识数据湖格式）：
+3. 请通过浏览器或 Maven 仓库，下载以下 **4 个核心 Jar 包**，并放入 `flink-jars` 文件夹中（这些包将挂载给 Docker，让集群认识 Kafka、Paimon、S3 和 Hadoop 文件系统相关类）：
     * `flink-sql-connector-kafka-3.0.1-1.18.jar`
     * `paimon-flink-1.18-0.8.0.jar`
     * `flink-s3-fs-hadoop-1.18.0.jar`
+    * `hadoop-hdfs-client-3.3.4.jar`
 
 ---
 

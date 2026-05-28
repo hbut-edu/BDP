@@ -25,16 +25,18 @@
 ## 一、实验环境准备验收
 
 ### 1.1 核心依赖准备
-- [ ] 确认 `flink-jars` 文件夹存在，且包含以下 3 个核心 Jar 包：
+- [ ] 确认 `flink-jars` 文件夹存在，且包含以下 4 个核心 Jar 包：
   - `flink-sql-connector-kafka-3.0.1-1.18.jar`
   - `paimon-flink-1.18-0.8.0.jar`
   - `flink-s3-fs-hadoop-1.18.0.jar`
+  - `hadoop-hdfs-client-3.3.4.jar`
 
 **文字说明要求：**
-- 简述这 3 个 Jar 包的作用：
+- 简述这 4 个 Jar 包的作用：
   - Kafka 连接器：用于 Flink 与 Kafka 消息队列的通信
   - Paimon 连接器：实现 Flink 与 Paimon 数据湖格式的集成
   - S3 文件系统：支持 Flink 读写 MinIO 对象存储
+  - Hadoop HDFS Client：提供 Paimon 创建 Catalog 时依赖的 Hadoop 文件系统配置类
 - 说明为什么需要将这些 Jar 包挂载到 Docker 容器中
 
 **截图要求：** 展示 `flink-jars` 文件夹内容（截图 1）
