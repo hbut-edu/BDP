@@ -576,9 +576,10 @@ http://127.0.0.1:5050
 
 ### 1. 启动 Kafka
 
-在仓库根目录可使用已有 `compose.yaml`：
+进入本实验的代码目录，使用其中的 `compose.yaml`：
 
 ```bash
+cd code/short-video-stream-lab
 docker compose up -d kafka
 ```
 

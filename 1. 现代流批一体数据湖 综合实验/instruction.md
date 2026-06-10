@@ -205,8 +205,10 @@ docker compose up -d --scale spark-worker=3
 
 ## 第二阶段：源头活水 (Python 模拟电商订单流入)
 
+本实验已在 `code/mock_data_producer.py` 提供订单数据生成器，可将其复制到 `bigdata-lab` 目录后直接使用。
+
 在 `bigdata-lab` 目录下新建 `mock_data_producer.py`。
-*(执行前，请在终端执行 `pip install kafka-python`)*
+*(使用文档示例前，请执行 `pip install kafka-python`；使用仓库提供的生成器时，请执行 `pip install kafka-python Faker`。)*
 
 ```python
 import json 
